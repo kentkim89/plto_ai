@@ -5,8 +5,8 @@ import numpy as np
 import openpyxl
 from openpyxl.styles import PatternFill, Border, Side, Alignment
 from datetime import datetime
-import plotly.express as px
-import plotly.graph_objects as go
+import requests
+from urllib.parse import urlparse
 
 # --------------------------------------------------------------------------
 # 페이지 설정
@@ -18,19 +18,56 @@ st.set_page_config(
 )
 
 # --------------------------------------------------------------------------
-# 함수 정의
+# SharePoint 데이터 로드 함수
 # --------------------------------------------------------------------------
 
-@st.cache_data
-def load_local_master_data(file_path="master_data.csv"):
-    """마스터 데이터 로드"""
+@st.cache_data(ttl=600)  # 10분 캐시
+def load_master_data_from_sharepoint():
+    """SharePoint URL에서 직접 마스터 데이터 로드"""
     try:
-        df_master = pd.read_csv(file_path)
+        # Streamlit secrets에서 SharePoint URL 가져오기
+        if "sharepoint_files" not in st.secrets:
+            st.error("SharePoint 설정이 없습니다. secrets.toml 파일을 확인하세요.")
+            return pd.DataFrame()
+        
+        file_url = st.secrets["sharepoint_files"]["plto_master_data_file_url"]
+        
+        # SharePoint 공유 링크를 다운로드 가능한 링크로 변환
+        # SharePoint 링크 형식: https://goremi.sharepoint.com/:x:/s/data/...
+        # 다운로드 링크 형식: https://goremi.sharepoint.com/sites/data/_layouts/15/download.aspx?share=...
+        
+        if "sharepoint.com/:x:" in file_url:
+            # 공유 링크에서 share ID 추출
+            parts = file_url.split('/')
+            share_id = parts[-1].split('?')[0]
+            base_url = file_url.split('/:x:')[0]
+            site_path = "/sites/data"
+            download_url = f"{base_url}{site_path}/_layouts/15/download.aspx?share={share_id}"
+        else:
+            # 이미 다운로드 가능한 링크인 경우
+            download_url = file_url
+        
+        # 파일 다운로드
+        response = requests.get(download_url, timeout=30)
+        response.raise_for_status()
+        
+        # Excel 파일 읽기
+        df_master = pd.read_excel(io.BytesIO(response.content))
         df_master = df_master.drop_duplicates(subset=['SKU코드'], keep='first')
+        
+        st.success("✅ SharePoint에서 마스터 데이터를 성공적으로 불러왔습니다.")
         return df_master
+        
     except Exception as e:
-        st.error(f"마스터 데이터 파일을 찾을 수 없습니다: {e}")
+        st.error(f"❌ SharePoint 데이터 로드 실패: {e}")
+        
+        # 대체 방법: 사용자가 직접 업로드
+        st.warning("SharePoint 연결 실패. 마스터 데이터를 직접 업로드해주세요.")
         return pd.DataFrame()
+
+# --------------------------------------------------------------------------
+# 기존 처리 함수들
+# --------------------------------------------------------------------------
 
 def to_excel_formatted(df, format_type=None):
     """데이터프레임을 서식이 적용된 엑셀 파일로 변환"""
@@ -341,181 +378,281 @@ def process_all_files(file1, file2, file3, df_master):
 
     except Exception as e:
         import traceback
-        return None, None, None, None, False, f"❌ 오류: {str(e)}", []
-
-def create_simple_dashboard(df_records):
-    """간단한 대시보드 생성"""
-    if df_records.empty:
-        st.warning("분석할 데이터가 없습니다.")
-        return
-    
-    # 메트릭스
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        total_revenue = df_records['실결제금액'].sum()
-        st.metric("총 매출", f"₩{total_revenue:,.0f}")
-    
-    with col2:
-        total_orders = len(df_records)
-        st.metric("총 주문수", f"{total_orders:,}")
-    
-    with col3:
-        avg_order = total_revenue / total_orders if total_orders > 0 else 0
-        st.metric("평균 주문", f"₩{avg_order:,.0f}")
-    
-    with col4:
-        unique_customers = df_records['수령자명'].nunique()
-        st.metric("고객수", f"{unique_customers:,}")
-    
-    # 차트
-    tab1, tab2, tab3 = st.tabs(["📈 매출 트렌드", "🏆 베스트셀러", "🛒 채널 분석"])
-    
-    with tab1:
-        # 일별 매출
-        daily_sales = df_records.groupby('주문일자')['실결제금액'].sum().reset_index()
-        fig = px.line(daily_sales, x='주문일자', y='실결제금액', title="일별 매출 추이")
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with tab2:
-        # TOP 10 상품
-        top_products = df_records.groupby('SKU상품명')['주문수량'].sum().nlargest(10).reset_index()
-        fig = px.bar(top_products, x='주문수량', y='SKU상품명', orientation='h', title="TOP 10 상품")
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with tab3:
-        # 채널별 매출
-        channel_sales = df_records.groupby('쇼핑몰')['실결제금액'].sum().reset_index()
-        fig = px.pie(channel_sales, values='실결제금액', names='쇼핑몰', title="채널별 매출 비중")
-        st.plotly_chart(fig, use_container_width=True)
+        return None, None, None, None, False, f"❌ 오류: {str(e)}\n{traceback.format_exc()}", []
 
 # --------------------------------------------------------------------------
 # 메인 앱
 # --------------------------------------------------------------------------
 
+st.title("📊 주문 처리 자동화 시스템 v2.0")
+st.markdown("### SharePoint 연동 버전")
+st.markdown("---")
+
 # 사이드바
 with st.sidebar:
-    st.title("📊 Order Pro v2.0")
-    st.markdown("---")
+    st.header("📌 상태")
     
-    menu = st.radio(
-        "메뉴",
-        ["📑 주문 처리", "📈 판매 분석"],
-        index=0
-    )
+    # SharePoint 연결 상태 체크
+    if "sharepoint_files" in st.secrets:
+        st.success("✅ SharePoint 설정 완료")
+    else:
+        st.error("❌ SharePoint 미설정")
+        st.info("secrets.toml 파일 설정 필요")
+    
+    # 캐시 초기화 버튼
+    if st.button("🔄 캐시 초기화"):
+        st.cache_data.clear()
+        st.success("캐시가 초기화되었습니다.")
+        st.rerun()
     
     st.markdown("---")
-    st.caption("© 2024 Order Processing System")
+    st.caption("© 2024 PLTO System")
 
-# 메인 화면
-if menu == "📑 주문 처리":
-    st.title("📑 주문 처리 자동화")
-    st.info("💡 3개의 파일을 업로드하면 자동으로 처리됩니다.")
+# 탭 생성
+tab1, tab2, tab3 = st.tabs(["📑 주문 처리", "📈 통계", "⚙️ 설정"])
+
+with tab1:
+    st.header("📤 파일 업로드")
     
-    # 파일 업로드
-    st.header("1️⃣ 파일 업로드")
+    # 마스터 데이터 로드 섹션
+    with st.expander("📊 마스터 데이터 상태", expanded=True):
+        if st.button("🔄 SharePoint에서 마스터 데이터 새로고침"):
+            st.cache_data.clear()
+            
+        df_master = load_master_data_from_sharepoint()
+        
+        if not df_master.empty:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("총 SKU", f"{len(df_master):,}개")
+            with col2:
+                st.metric("과세 상품", f"{len(df_master[df_master['과세여부']=='과세']):,}개")
+            with col3:
+                st.metric("면세 상품", f"{len(df_master[df_master['과세여부']=='면세']):,}개")
+        else:
+            st.warning("⚠️ 마스터 데이터가 없습니다. 수동으로 업로드하세요.")
+            manual_master = st.file_uploader("마스터 데이터 업로드", type=['xlsx', 'xls', 'csv'], key="master")
+            if manual_master:
+                try:
+                    if manual_master.name.endswith('.csv'):
+                        df_master = pd.read_csv(manual_master)
+                    else:
+                        df_master = pd.read_excel(manual_master)
+                    df_master = df_master.drop_duplicates(subset=['SKU코드'], keep='first')
+                    st.success(f"✅ 마스터 데이터 로드 완료: {len(df_master)}개 SKU")
+                except Exception as e:
+                    st.error(f"파일 읽기 실패: {e}")
+    
+    st.markdown("---")
+    
+    # 주문 파일 업로드
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        file1 = st.file_uploader("스마트스토어", type=['xlsx', 'xls'])
+        file1 = st.file_uploader("📱 스마트스토어", type=['xlsx', 'xls'], key="smart")
     with col2:
-        file2 = st.file_uploader("이카운트", type=['xlsx', 'xls'])
+        file2 = st.file_uploader("📋 이카운트", type=['xlsx', 'xls'], key="ecount")
     with col3:
-        file3 = st.file_uploader("고도몰", type=['xlsx', 'xls'])
+        file3 = st.file_uploader("🏪 고도몰", type=['xlsx', 'xls'], key="godo")
     
     # 처리 버튼
-    st.header("2️⃣ 데이터 처리")
-    
-    if st.button("🚀 처리 시작", type="primary", disabled=not(file1 and file2 and file3)):
+    if st.button("🚀 처리 시작", type="primary", use_container_width=True):
         if file1 and file2 and file3:
-            # 마스터 데이터 로드
-            with st.spinner('준비 중...'):
-                df_master = load_local_master_data()
-            
-            if df_master.empty:
-                st.error("❌ master_data.csv 파일이 필요합니다!")
-            else:
+            if not df_master.empty:
                 # 파일 처리
-                with st.spinner('처리 중...'):
+                with st.spinner('데이터 처리 중... 잠시만 기다려주세요.'):
                     result = process_all_files(file1, file2, file3, df_master)
                     df_main, df_qty, df_pack, df_ecount, success, message, warnings = result
                 
                 if success:
+                    st.balloons()
                     st.success(message)
                     
                     # 경고 표시
                     if warnings:
-                        with st.expander(f"⚠️ 확인 필요 ({len(warnings)}건)"):
+                        with st.expander(f"⚠️ 확인 필요 항목 ({len(warnings)}건)", expanded=True):
                             for w in warnings:
                                 st.write(w)
                     
-                    # 결과 표시
+                    # 결과 저장
+                    st.session_state['result'] = {
+                        'main': df_main,
+                        'qty': df_qty,
+                        'pack': df_pack,
+                        'ecount': df_ecount
+                    }
+                    
+                    # 다운로드 섹션
+                    st.markdown("---")
+                    st.subheader("📥 다운로드")
+                    
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     
-                    tabs = st.tabs(["이카운트", "포장리스트", "수량요약", "최종결과"])
+                    col1, col2, col3, col4 = st.columns(4)
                     
-                    with tabs[0]:
-                        st.dataframe(df_ecount, use_container_width=True)
+                    with col1:
                         st.download_button(
-                            "📥 다운로드",
+                            "💼 이카운트",
                             to_excel_formatted(df_ecount, 'ecount_upload'),
                             f"이카운트_{timestamp}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            mime="application/vnd.ms-excel",
+                            use_container_width=True
                         )
                     
-                    with tabs[1]:
-                        st.dataframe(df_pack, use_container_width=True)
+                    with col2:
                         st.download_button(
-                            "📥 다운로드",
+                            "📦 포장리스트",
                             to_excel_formatted(df_pack, 'packing_list'),
-                            f"포장리스트_{timestamp}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            f"포장_{timestamp}.xlsx",
+                            mime="application/vnd.ms-excel",
+                            use_container_width=True
                         )
                     
-                    with tabs[2]:
-                        st.dataframe(df_qty, use_container_width=True)
+                    with col3:
                         st.download_button(
-                            "📥 다운로드",
+                            "📊 수량요약",
                             to_excel_formatted(df_qty, 'quantity_summary'),
-                            f"수량요약_{timestamp}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            f"수량_{timestamp}.xlsx",
+                            mime="application/vnd.ms-excel",
+                            use_container_width=True
                         )
                     
-                    with tabs[3]:
-                        st.dataframe(df_main, use_container_width=True)
+                    with col4:
                         st.download_button(
-                            "📥 다운로드",
+                            "✅ 최종결과",
                             to_excel_formatted(df_main),
-                            f"최종결과_{timestamp}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            f"결과_{timestamp}.xlsx",
+                            mime="application/vnd.ms-excel",
+                            use_container_width=True
                         )
                     
-                    # 간단한 분석 저장 (세션 스테이트)
-                    st.session_state['last_result'] = df_main
+                    # 미리보기
+                    st.markdown("---")
+                    st.subheader("📋 데이터 미리보기")
+                    
+                    preview_option = st.selectbox(
+                        "확인할 데이터 선택",
+                        ["이카운트 업로드", "포장 리스트", "수량 요약", "최종 결과"]
+                    )
+                    
+                    if preview_option == "이카운트 업로드":
+                        st.dataframe(df_ecount, use_container_width=True)
+                    elif preview_option == "포장 리스트":
+                        st.dataframe(df_pack, use_container_width=True)
+                    elif preview_option == "수량 요약":
+                        st.dataframe(df_qty, use_container_width=True)
+                    else:
+                        st.dataframe(df_main, use_container_width=True)
                     
                 else:
                     st.error(message)
+            else:
+                st.error("❌ 마스터 데이터가 필요합니다!")
         else:
             st.warning("⚠️ 3개 파일을 모두 업로드해주세요!")
 
-else:  # 판매 분석
-    st.title("📈 판매 분석")
+with tab2:
+    st.header("📊 통계 분석")
     
-    if 'last_result' in st.session_state:
-        st.info("💡 마지막 처리 결과를 분석합니다.")
-        create_simple_dashboard(st.session_state['last_result'])
-    else:
-        st.warning("먼저 주문 처리를 실행해주세요.")
+    if 'result' in st.session_state:
+        df = st.session_state['result']['main']
         
-        # 샘플 데이터로 데모
-        if st.button("🎯 샘플 데이터로 데모 보기"):
-            # 샘플 데이터 생성
-            sample_data = pd.DataFrame({
-                '주문일자': pd.date_range('2024-01-01', periods=30),
-                'SKU상품명': np.random.choice(['상품A', '상품B', '상품C'], 30),
-                '주문수량': np.random.randint(1, 10, 30),
-                '실결제금액': np.random.randint(10000, 100000, 30),
-                '쇼핑몰': np.random.choice(['스마트스토어', '쿠팡', '고도몰5'], 30),
-                '수령자명': [f'고객{i%10}' for i in range(30)]
-            })
-            create_simple_dashboard(sample_data)
+        # 기본 메트릭
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_revenue = df['실결제금액'].sum()
+            st.metric("💰 총 매출", f"₩{total_revenue:,.0f}")
+        
+        with col2:
+            total_orders = len(df)
+            st.metric("📦 총 주문수", f"{total_orders:,}")
+        
+        with col3:
+            avg_order = total_revenue / total_orders if total_orders > 0 else 0
+            st.metric("💵 평균 주문액", f"₩{avg_order:,.0f}")
+        
+        with col4:
+            unique_customers = df['수령자명'].nunique()
+            st.metric("👥 고객수", f"{unique_customers:,}")
+        
+        st.markdown("---")
+        
+        # 채널별 분석
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🛒 채널별 매출")
+            channel_stats = df.groupby('쇼핑몰')['실결제금액'].sum().sort_values(ascending=True)
+            st.bar_chart(channel_stats)
+            
+            # 상세 테이블
+            channel_detail = df.groupby('쇼핑몰').agg({
+                '실결제금액': 'sum',
+                '주문수량': 'sum',
+                '수령자명': 'nunique'
+            }).round(0)
+            channel_detail.columns = ['매출액', '판매수량', '고객수']
+            st.dataframe(channel_detail, use_container_width=True)
+        
+        with col2:
+            st.subheader("🏆 TOP 10 상품")
+            top_products = df.groupby('SKU상품명')['주문수량'].sum().nlargest(10).sort_values(ascending=True)
+            st.bar_chart(top_products)
+            
+            # 상세 테이블
+            product_detail = df.groupby('SKU상품명').agg({
+                '주문수량': 'sum',
+                '실결제금액': 'sum'
+            }).nlargest(10, '주문수량')
+            product_detail.columns = ['판매수량', '매출액']
+            st.dataframe(product_detail, use_container_width=True)
+        
+    else:
+        st.info("📌 먼저 주문 처리를 실행해주세요.")
+
+with tab3:
+    st.header("⚙️ 시스템 설정")
+    
+    st.subheader("📁 SharePoint 설정")
+    
+    if "sharepoint_files" in st.secrets:
+        st.code(f"""
+[sharepoint_files]
+plto_master_data_file_url = "{st.secrets['sharepoint_files']['plto_master_data_file_url'][:50]}..."
+site_name = "{st.secrets['sharepoint_files']['site_name']}"
+file_name = "{st.secrets['sharepoint_files']['file_name']}"
+        """)
+        st.success("✅ SharePoint 설정이 정상적으로 구성되어 있습니다.")
+    else:
+        st.warning("⚠️ SharePoint 설정이 없습니다.")
+        st.info("""
+        Streamlit secrets.toml 파일에 다음과 같이 설정하세요:
+        
+        ```toml
+        [sharepoint_files]
+        plto_master_data_file_url = "SharePoint 공유 링크"
+        site_name = "data"
+        file_name = "plto_master_data.xlsx"
+        ```
+        """)
+    
+    st.markdown("---")
+    
+    st.subheader("📝 사용 방법")
+    st.markdown("""
+    1. **마스터 데이터 확인**: SharePoint에서 자동으로 불러옵니다
+    2. **파일 업로드**: 스마트스토어, 이카운트, 고도몰 파일을 각각 업로드
+    3. **처리 실행**: '처리 시작' 버튼 클릭
+    4. **결과 다운로드**: 생성된 4개의 파일 다운로드
+    5. **통계 확인**: 통계 탭에서 판매 분석 확인
+    """)
+    
+    st.markdown("---")
+    
+    st.subheader("🔧 문제 해결")
+    st.markdown("""
+    - **SharePoint 연결 실패**: secrets.toml 파일 확인
+    - **마스터 데이터 없음**: 수동으로 업로드 가능
+    - **처리 오류**: 파일 형식과 컬럼명 확인
+    - **캐시 문제**: 사이드바의 '캐시 초기화' 클릭
+    """)
