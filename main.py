@@ -272,8 +272,21 @@ def analyze_sales_with_ai(df_records):
     
     try:
         model = init_gemini()
+        if not model:
+            # 모델 초기화 실패 시 다시 시도
+            api_key = st.secrets.get("GEMINI_API_KEY", None)
+            if api_key:
+                genai.configure(api_key=api_key)
+                # 다양한 모델 시도
+                for model_name in ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']:
+                    try:
+                        model = genai.GenerativeModel(model_name)
+                        break
+                    except:
+                        continue
+        
         if not model or df_records.empty:
-            return None
+            return "AI 모델을 초기화할 수 없습니다."
         
         # 분석을 위한 데이터 준비
         summary = {
@@ -303,7 +316,8 @@ def analyze_sales_with_ai(df_records):
         return response.text
         
     except Exception as e:
-        return f"AI 분석 오류: {e}"
+        # 에러 메시지에 모델 정보 포함
+        return f"AI 분석 오류: {e}\n\n사용 가능한 모델을 확인하려면 설정 페이지에서 'AI 연결 테스트'를 실행하세요."
 
 # --------------------------------------------------------------------------
 # 데이터 처리 함수
