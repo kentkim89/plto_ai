@@ -4,6 +4,6 @@ numpy
 openpyxl
 plotly
 requests
-Office365-REST-Python-Client
-google-generativeai
+msal
 python-dateutil
+google-generativeai
