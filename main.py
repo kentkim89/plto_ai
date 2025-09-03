@@ -669,13 +669,18 @@ def create_analytics_dashboard(df_records):
         }).reset_index()
         channel_stats.columns = ['쇼핑몰', '매출액', '판매수량', '고객수']
         
-        fig = px.pie(
-            channel_stats,
-            values='매출액',
-            names='쇼핑몰',
-            title="채널별 매출 비중"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        if PLOTLY_AVAILABLE:
+            fig = px.pie(
+                channel_stats,
+                values='매출액',
+                names='쇼핑몰',
+                title="채널별 매출 비중"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.subheader("채널별 매출 비중")
+            # Streamlit 네이티브 차트 사용
+            st.bar_chart(channel_stats.set_index('쇼핑몰')['매출액'])
         
         # 채널별 성과 지표
         st.dataframe(channel_stats, use_container_width=True)
@@ -740,6 +745,21 @@ if menu == "📑 주문 처리":
     
     # 마스터 데이터 섹션
     with st.expander("📊 마스터 데이터 상태", expanded=True):
+        # 디버그 모드 추가
+        debug = st.checkbox("🔍 디버그 모드", value=False)
+        
+        if debug:
+            st.info("SharePoint 설정 확인")
+            if "sharepoint_files" in st.secrets:
+                st.code(f"""
+URL: {st.secrets['sharepoint_files']['plto_master_data_file_url'][:100]}...
+Site: {st.secrets['sharepoint_files']['site_name']}
+File: {st.secrets['sharepoint_files']['file_name']}
+                """)
+            
+            if st.button("🧪 수동 테스트"):
+                st.cache_data.clear()
+        
         df_master = load_master_data_from_sharepoint()
         
         if not df_master.empty:
@@ -750,9 +770,40 @@ if menu == "📑 주문 처리":
                 st.metric("과세 상품", f"{(df_master['과세여부']=='과세').sum():,}개")
             with col3:
                 st.metric("면세 상품", f"{(df_master['과세여부']=='면세').sum():,}개")
+            
+            if debug:
+                st.success("✅ 마스터 데이터 로드 성공!")
+                st.dataframe(df_master.head(), use_container_width=True)
         else:
-            st.warning("마스터 데이터가 없습니다. 수동 업로드가 필요합니다.")
-            uploaded_master = st.file_uploader("마스터 데이터 업로드", type=['xlsx', 'xls', 'csv'])
+            st.warning("⚠️ 마스터 데이터가 없습니다. 수동 업로드가 필요합니다.")
+            
+            # URL 직접 입력 옵션 추가
+            with st.form("manual_url"):
+                st.write("SharePoint URL 직접 입력")
+                manual_url = st.text_input(
+                    "파일 URL",
+                    value=st.secrets.get("sharepoint_files", {}).get("plto_master_data_file_url", "")
+                )
+                
+                if st.form_submit_button("URL로 로드"):
+                    try:
+                        # 다양한 형식 시도
+                        if "sharepoint.com" in manual_url:
+                            # 공유 링크를 다운로드 링크로 변환
+                            test_url = manual_url.replace("?e=", "?download=1&e=")
+                            response = requests.get(test_url, timeout=30)
+                            
+                            if response.status_code == 200:
+                                df_test = pd.read_excel(io.BytesIO(response.content))
+                                st.success(f"✅ 성공! {len(df_test)}개 행 로드")
+                                df_master = df_test.drop_duplicates(subset=['SKU코드'], keep='first')
+                            else:
+                                st.error(f"다운로드 실패: {response.status_code}")
+                    except Exception as e:
+                        st.error(f"오류: {e}")
+            
+            # 파일 직접 업로드 옵션
+            uploaded_master = st.file_uploader("또는 파일 직접 업로드", type=['xlsx', 'xls', 'csv'])
             if uploaded_master:
                 try:
                     if uploaded_master.name.endswith('.csv'):
