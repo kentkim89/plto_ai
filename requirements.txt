@@ -1,0 +1,24 @@
+# Streamlit 프레임워크
+streamlit==1.32.0
+
+# 데이터 처리
+pandas==2.2.0
+numpy==1.26.3
+openpyxl==3.1.2
+
+# SharePoint 연동
+Office365-REST-Python-Client==2.5.3
+
+# 데이터 시각화
+plotly==5.19.0
+
+# AI 분석 (Gemini)
+google-generativeai==0.3.2
+
+# HTTP 요청 및 유틸리티
+requests==2.31.0
+python-dateutil==2.8.2
+
+# 추가 의존성 (필요시)
+urllib3==2.1.0
+certifi==2024.2.2
