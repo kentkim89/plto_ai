@@ -242,9 +242,25 @@ def init_gemini():
         return None
     
     try:
+        # 다양한 방법으로 API 키 찾기
+        api_key = None
+        
+        # 방법 1: 직접 접근
         if "GEMINI_API_KEY" in st.secrets:
-            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+            api_key = st.secrets["GEMINI_API_KEY"]
+        # 방법 2: 속성으로 접근
+        elif hasattr(st.secrets, "GEMINI_API_KEY"):
+            api_key = st.secrets.GEMINI_API_KEY
+        # 방법 3: get 메서드
+        else:
+            api_key = st.secrets.get("GEMINI_API_KEY", None)
+        
+        if api_key:
+            genai.configure(api_key=api_key)
             return genai.GenerativeModel('gemini-pro')
+        else:
+            st.warning("Gemini API 키를 찾을 수 없습니다.")
+            
     except Exception as e:
         st.warning(f"Gemini AI 초기화 실패: {e}")
     return None
