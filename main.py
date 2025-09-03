@@ -984,8 +984,8 @@ elif menu == "📈 판매 분석":
 elif menu == "⚙️ 설정":
     st.title("⚙️ 시스템 설정")
     
-    # SharePoint 설정
-    st.header("📁 SharePoint 설정")
+    # Graph API 설정
+    st.header("📁 Microsoft Graph API 설정")
     
     if "sharepoint" in st.secrets:
         col1, col2 = st.columns(2)
@@ -996,20 +996,22 @@ elif menu == "⚙️ 설정":
             st.text_input("Site Name", value=st.secrets["sharepoint_files"]["site_name"], disabled=True)
             st.text_input("File Name", value=st.secrets["sharepoint_files"]["file_name"], disabled=True)
         
-        if st.button("🔄 SharePoint 연결 테스트"):
+        if st.button("🔄 Graph API 연결 테스트"):
             with st.spinner("테스트 중..."):
-                ctx = init_sharepoint_context()
-                if ctx:
-                    st.success("✅ SharePoint 연결 성공!")
+                token = get_graph_token()
+                if token:
+                    st.success("✅ Microsoft Graph API 연결 성공!")
+                    # 토큰 정보 일부 표시
+                    st.info(f"토큰 길이: {len(token)} 문자")
                 else:
-                    st.error("❌ SharePoint 연결 실패")
+                    st.error("❌ Graph API 연결 실패")
     else:
-        st.warning("SharePoint 설정이 없습니다.")
+        st.warning("Graph API 설정이 없습니다.")
         st.code("""
 # secrets.toml 예시
 [sharepoint]
 tenant_id = "your-tenant-id"
-client_id = "your-client-id"
+client_id = "your-client-id"  
 client_secret = "your-secret"
 
 [sharepoint_files]
@@ -1040,7 +1042,7 @@ file_name = "plto_master_data.xlsx"
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("SharePoint", "활성화" if SHAREPOINT_AVAILABLE else "비활성화")
+        st.metric("Graph API", "활성화" if GRAPH_AVAILABLE else "비활성화")
     with col2:
         st.metric("AI 분석", "활성화" if GEMINI_AVAILABLE else "비활성화")
     with col3:
