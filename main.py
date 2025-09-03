@@ -55,13 +55,19 @@ def init_sharepoint_context():
         if "sharepoint" not in st.secrets:
             return None
             
-        tenant_id = st.secrets["sharepoint"]["tenant_id"]
         client_id = st.secrets["sharepoint"]["client_id"]
         client_secret = st.secrets["sharepoint"]["client_secret"]
         site_url = "https://goremi.sharepoint.com/sites/data"
         
+        # ClientCredential 방식 (Azure AD App)
         credentials = ClientCredential(client_id, client_secret)
         ctx = ClientContext(site_url).with_credentials(credentials)
+        
+        # 연결 테스트
+        web = ctx.web
+        ctx.load(web)
+        ctx.execute_query()
+        
         return ctx
     except Exception as e:
         st.error(f"SharePoint 연결 실패: {e}")
@@ -716,12 +722,13 @@ with st.sidebar:
     st.markdown("---")
     st.caption("📌 시스템 상태")
     
-    # SharePoint 상태
-    if SHAREPOINT_AVAILABLE:
-        if init_sharepoint_context():
-            st.success("✅ SharePoint 연결")
+    # SharePoint/Graph 상태
+    if GRAPH_AVAILABLE:
+        token = get_graph_token()
+        if token:
+            st.success("✅ Graph API 연결")
         else:
-            st.warning("⚠️ SharePoint 설정 필요")
+            st.warning("⚠️ Graph API 인증 필요")
     else:
         st.info("💾 로컬 모드")
     
