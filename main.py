@@ -15,7 +15,7 @@ import base64
 # 페이지 설정 (가장 먼저 실행)
 # --------------------------------------------------------------------------
 st.set_page_config(
-    page_title="주문 처리 자동화 Pro v2.5",
+    page_title="주문 처리 자동화 Pro v2.6",
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded"
@@ -120,12 +120,11 @@ def save_to_sharepoint_records(df_main_result, df_ecount_upload):
 
     drive_id = st.session_state['sharepoint_drive_id']
     file_name = "plto_record_data.xlsx"
-    file_path_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}:/content" # 경로 수정
+    file_path_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}:/content"
     headers = {'Authorization': f'Bearer {token}'}
     existing_df = pd.DataFrame()
     
     try:
-        # 다운로드 URL에서는 :content를 빼야 파일 정보를 가져올 수 있습니다.
         download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}"
         info_response = requests.get(download_url, headers=headers)
         if info_response.status_code == 200:
@@ -153,8 +152,6 @@ def save_to_sharepoint_records(df_main_result, df_ecount_upload):
         
         output = BytesIO()
         combined_df.to_excel(output, index=False, sheet_name='Records')
-        
-        # [최종 수정] 스트림 방식으로 데이터 업로드
         output.seek(0)
         
         upload_headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/octet-stream'}
@@ -168,8 +165,45 @@ def save_to_sharepoint_records(df_main_result, df_ecount_upload):
         st.error(traceback.format_exc())
         return False, f"레코드 저장 중 오류 발생: {e}"
 
-# ... (이하 모든 다른 함수들은 이전 버전과 동일하게 유지) ...
+# [새 함수 추가] 판매 분석용 데이터 로드
+@st.cache_data(ttl=600)
+def load_analysis_data_from_sharepoint():
+    """SharePoint에서 전체 판매 기록(plto_record_data.xlsx)을 불러옵니다."""
+    if not GRAPH_AVAILABLE:
+        st.warning("Graph API가 연결되지 않아 판매 기록을 불러올 수 없습니다.")
+        return pd.DataFrame()
 
+    token = get_graph_token()
+    if not token:
+        return pd.DataFrame()
+
+    if "sharepoint_drive_id" not in st.session_state:
+        # 드라이브 ID가 없으면 마스터 데이터 로드 로직을 통해 가져옴
+        _, drive_id, _ = load_master_data_from_sharepoint()
+        if not drive_id:
+            st.warning("SharePoint 드라이브 정보를 먼저 로드해야 합니다. '주문 처리' 탭을 먼저 방문해주세요.")
+            return pd.DataFrame()
+        st.session_state['sharepoint_drive_id'] = drive_id
+
+    drive_id = st.session_state['sharepoint_drive_id']
+    file_name = "plto_record_data.xlsx"
+    headers = {'Authorization': f'Bearer {token}'}
+    
+    try:
+        download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}"
+        info_response = requests.get(download_url, headers=headers)
+        if info_response.status_code == 200:
+            content_url = info_response.json().get('@microsoft.graph.downloadUrl')
+            if content_url:
+                download_response = requests.get(content_url)
+                if download_response.content:
+                    return pd.read_excel(io.BytesIO(download_response.content))
+        return pd.DataFrame()  # 파일이 없거나 비어있으면 빈 DF 반환
+    except Exception as e:
+        st.error(f"분석 데이터 로드 중 오류 발생: {e}")
+        return pd.DataFrame()
+
+# ... (AI 및 데이터 처리 함수들은 이전과 동일) ...
 @st.cache_resource
 def init_gemini():
     """Gemini AI 초기화. 여러 모델을 시도하여 안정성을 높입니다."""
@@ -412,7 +446,7 @@ def create_analytics_dashboard(df_records):
     
     with tab1:
         st.subheader("일별 매출 트렌드")
-        df_records['주문일자'] = pd.to_datetime(df_records['주문일자'])
+        # 이미 datetime 객체로 변환되었으므로 추가 변환 필요 없음
         daily_sales = df_records.groupby(df_records['주문일자'].dt.date)['실결제금액'].sum()
         st.line_chart(daily_sales)
     
@@ -431,12 +465,13 @@ def create_analytics_dashboard(df_records):
                 st.markdown(analyze_sales_with_ai(df_records))
         else:
             st.warning("AI 분석 기능을 사용하려면 google-generativeai를 설치하세요.")
+
 # --------------------------------------------------------------------------
 # 메인 앱
 # --------------------------------------------------------------------------
 def main():
     with st.sidebar:
-        st.title("📊 Order Pro v2.5")
+        st.title("📊 Order Pro v2.6")
         st.markdown("---")
         menu = st.radio("메뉴 선택", ["📑 주문 처리", "📈 판매 분석", "⚙️ 설정"])
         st.markdown("---")
@@ -526,13 +561,22 @@ def main():
                 st.error(message)
     
     elif menu == "📈 판매 분석":
-        st.title("📈 판매 분석")
-        if 'last_result' in st.session_state and not st.session_state['last_result'].empty:
-            df_records = st.session_state['last_result'].copy()
-            df_records['주문일자'] = pd.to_datetime(st.session_state['processed_date'], format='%Y%m%d')
-            create_analytics_dashboard(df_records)
+        st.title("📈 판매 분석 대시보드")
+        st.info("SharePoint에 저장된 전체 판매 기록을 바탕으로 분석합니다.")
+
+        with st.spinner("SharePoint에서 전체 판매 기록을 불러오는 중..."):
+            df_records = load_analysis_data_from_sharepoint()
+
+        if df_records.empty:
+            st.warning("분석할 데이터가 없습니다. 먼저 '주문 처리'를 1회 이상 실행하여 데이터를 저장해주세요.")
         else:
-            st.info("먼저 '주문 처리' 메뉴에서 데이터를 처리해주세요.")
+            try:
+                # 분석 전, 날짜 컬럼 타입을 datetime으로 변환
+                df_records['주문일자'] = pd.to_datetime(df_records['주문일자'])
+                create_analytics_dashboard(df_records)
+            except Exception as e:
+                st.error(f"데이터 분석 중 오류가 발생했습니다: {e}")
+                st.dataframe(df_records.head())
     
     elif menu == "⚙️ 설정":
         st.title("⚙️ 시스템 설정")
