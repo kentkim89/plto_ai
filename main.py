@@ -107,7 +107,6 @@ def load_master_data_from_sharepoint():
                 
                 # 방법 1: 사이트 ID로 파일 검색
                 try:
-                    # 사이트 검색
                     site_url = "https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/data"
                     site_response = requests.get(site_url, headers=headers)
                     
@@ -115,18 +114,15 @@ def load_master_data_from_sharepoint():
                         site_data = site_response.json()
                         site_id = site_data['id']
                         
-                        # 드라이브 목록 가져오기
                         drives_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
                         drives_response = requests.get(drives_url, headers=headers)
                         
                         if drives_response.status_code == 200:
                             drives = drives_response.json()['value']
                             
-                            # 각 드라이브에서 파일 검색
                             for drive in drives:
                                 drive_id = drive['id']
                                 
-                                # 파일 검색
                                 search_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='plto_master_data.xlsx')"
                                 search_response = requests.get(search_url, headers=headers)
                                 
@@ -135,11 +131,14 @@ def load_master_data_from_sharepoint():
                                     
                                     for item in items:
                                         if item['name'] == 'plto_master_data.xlsx':
-                                            # 파일 다운로드
                                             download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item['id']}/content"
                                             file_response = requests.get(download_url, headers=headers)
                                             
                                             if file_response.status_code == 200:
+                                                # [추가] 세션에 사이트 및 드라이브 ID 저장
+                                                st.session_state['sharepoint_site_id'] = site_id
+                                                st.session_state['sharepoint_drive_id'] = drive_id
+                                                
                                                 df_master = pd.read_excel(io.BytesIO(file_response.content))
                                                 df_master = df_master.drop_duplicates(subset=['SKU코드'], keep='first')
                                                 st.success("✅ Microsoft Graph API로 마스터 데이터 로드 성공!")
@@ -152,33 +151,39 @@ def load_master_data_from_sharepoint():
                     if "sharepoint_files" in st.secrets:
                         share_url = st.secrets["sharepoint_files"]["plto_master_data_file_url"]
                         
-                        # 공유 링크를 통한 파일 정보 가져오기
                         if "sharepoint.com" in share_url:
-                            # 공유 링크를 base64로 인코딩
                             encoded_url = base64.b64encode(share_url.encode()).decode()
-                            # u! 접두사 추가
                             sharing_token = f"u!{encoded_url.rstrip('=').replace('/', '_').replace('+', '-')}"
                             
-                            # Graph API로 공유 아이템 접근
-                            shares_url = f"https://graph.microsoft.com/v1.0/shares/{sharing_token}/driveItem/content"
-                            file_response = requests.get(shares_url, headers=headers)
-                            
-                            if file_response.status_code == 200:
-                                df_master = pd.read_excel(io.BytesIO(file_response.content))
-                                df_master = df_master.drop_duplicates(subset=['SKU코드'], keep='first')
-                                st.success("✅ 공유 링크를 통해 마스터 데이터 로드 성공!")
-                                return df_master
+                            shares_url = f"https://graph.microsoft.com/v1.0/shares/{sharing_token}/driveItem"
+                            item_info_response = requests.get(shares_url, headers=headers)
+
+                            if item_info_response.status_code == 200:
+                                item_info = item_info_response.json()
+                                drive_id = item_info.get('parentReference', {}).get('driveId')
+                                item_id = item_info.get('id')
+                                site_id = item_info.get('parentReference', {}).get('siteId')
+
+                                if drive_id and item_id and site_id:
+                                    # [추가] 세션에 사이트 및 드라이브 ID 저장
+                                    st.session_state['sharepoint_site_id'] = site_id
+                                    st.session_state['sharepoint_drive_id'] = drive_id
+
+                                    download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
+                                    file_response = requests.get(download_url, headers=headers)
+
+                                    if file_response.status_code == 200:
+                                        df_master = pd.read_excel(io.BytesIO(file_response.content))
+                                        df_master = df_master.drop_duplicates(subset=['SKU코드'], keep='first')
+                                        st.success("✅ 공유 링크를 통해 마스터 데이터 로드 성공!")
+                                        return df_master
                 except Exception as e:
                     st.info(f"Graph API 방법 2 실패: {e}")
         
-        # Graph API 실패 시 직접 다운로드 시도
         if "sharepoint_files" in st.secrets:
             file_url = st.secrets["sharepoint_files"]["plto_master_data_file_url"]
             
-            # 익명 다운로드 시도
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
+            headers = {'User-Agent': 'Mozilla/5.0'}
             
             response = requests.get(file_url, headers=headers, timeout=30, allow_redirects=True)
             if response.status_code == 200 and len(response.content) > 100:
@@ -192,21 +197,51 @@ def load_master_data_from_sharepoint():
     
     return pd.DataFrame()
 
+# [수정] SharePoint 저장 함수 전체 재작성
 def save_to_sharepoint_records(df_main_result, df_ecount_upload):
-    """Microsoft Graph API를 통해 처리 결과 저장"""
+    """Microsoft Graph API를 통해 처리 결과를 SharePoint에 기록/누적합니다."""
+    if not GRAPH_AVAILABLE:
+        st.info("Graph API가 활성화되지 않아 SharePoint에 자동 저장할 수 없습니다.")
+        return False, "Graph API 비활성화"
+    
+    token = get_graph_token()
+    if not token:
+        return False, "SharePoint 인증 토큰 획득 실패"
+        
+    if "sharepoint_drive_id" not in st.session_state:
+        st.warning("SharePoint 드라이브 정보를 찾을 수 없습니다. 마스터 데이터를 먼저 로드해야 합니다.")
+        load_master_data_from_sharepoint()
+        if "sharepoint_drive_id" not in st.session_state:
+            return False, "SharePoint 드라이브 정보 로드 실패"
+
+    drive_id = st.session_state['sharepoint_drive_id']
+    file_name = "plto_record_data.xlsx"
+    file_path_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}"
+
+    headers = {'Authorization': f'Bearer {token}'}
+    
+    # 1. 기존 데이터 다운로드
     try:
-        if not GRAPH_AVAILABLE:
-            st.info("Graph API 없이는 자동 저장할 수 없습니다.")
-            return False, "자동 저장 불가"
-        
-        token = get_graph_token()
-        if not token:
-            return False, "인증 실패"
-        
-        # 새 레코드 준비
+        download_response = requests.get(f"{file_path_url}:/content", headers=headers)
+        if download_response.status_code == 200:
+            existing_df = pd.read_excel(io.BytesIO(download_response.content))
+            st.info(f"기존 레코드 '{file_name}'에서 {len(existing_df)}개 데이터를 불러왔습니다.")
+        elif download_response.status_code == 404:
+            st.info(f"기존 레코드 '{file_name}'을 찾을 수 없어 새로 생성합니다.")
+            existing_df = pd.DataFrame()
+        else:
+            error_details = download_response.json()
+            return False, f"기존 레코드 다운로드 실패 ({download_response.status_code}): {error_details.get('error', {}).get('message', '알 수 없는 오류')}"
+            
+    except Exception as e:
+        return False, f"기존 레코드 처리 중 오류: {e}"
+
+    # 2. 새 레코드 준비
+    try:
         new_records = pd.DataFrame()
-        order_date = df_ecount_upload['일자'].iloc[0] if not df_ecount_upload.empty else datetime.now().strftime("%Y%m%d")
-        
+        order_date_str = df_ecount_upload['일자'].iloc[0] if not df_ecount_upload.empty else datetime.now().strftime("%Y%m%d")
+        order_date = pd.to_datetime(order_date_str, format='%Y%m%d').strftime('%Y-%m-%d')
+
         new_records['주문일자'] = order_date
         new_records['처리일시'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         new_records['재고관리코드'] = df_main_result['재고관리코드']
@@ -215,17 +250,32 @@ def save_to_sharepoint_records(df_main_result, df_ecount_upload):
         new_records['실결제금액'] = df_main_result['실결제금액']
         new_records['쇼핑몰'] = df_main_result['쇼핑몰']
         new_records['수령자명'] = df_main_result['수령자명']
-        
-        # Excel로 변환
+    
+        # 3. 데이터 병합
+        combined_df = pd.concat([existing_df, new_records], ignore_index=True)
+    
+        # 4. Excel 파일로 변환
         output = BytesIO()
-        new_records.to_excel(output, index=False, sheet_name='Records')
+        combined_df.to_excel(output, index=False, sheet_name='Records')
         output.seek(0)
+        file_content = output.getvalue()
+    
+        # 5. 파일 업로드 (덮어쓰기)
+        upload_headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        }
+        upload_response = requests.put(f"{file_path_url}:/content", headers=upload_headers, data=file_content)
         
-        # 임시 저장 (실제 업로드는 추가 구현 필요)
-        return True, f"✅ {len(new_records)}개 레코드 처리 완료"
-        
+        if upload_response.status_code in [200, 201]:
+            return True, f"✅ SharePoint에 {len(new_records)}개 신규 레코드 저장 완료 (총 {len(combined_df)}개)"
+        else:
+            error_details = upload_response.json()
+            return False, f"SharePoint 업로드 실패 ({upload_response.status_code}): {error_details.get('error', {}).get('message', '알 수 없는 오류')}"
+
     except Exception as e:
-        return False, f"저장 실패: {e}"
+        st.error(traceback.format_exc())
+        return False, f"레코드 저장 중 오류 발생: {e}"
 
 def load_record_data_from_sharepoint():
     """Graph API를 통해 기록 데이터 로드"""
@@ -235,59 +285,50 @@ def load_record_data_from_sharepoint():
 # AI 분석 함수
 # --------------------------------------------------------------------------
 
+# [수정] AI 초기화 함수 안정성 강화
 @st.cache_resource
 def init_gemini():
-    """Gemini AI 초기화"""
+    """Gemini AI 초기화. 여러 모델을 시도하여 안정성을 높입니다."""
     if not GEMINI_AVAILABLE:
         return None
     
     try:
-        # 다양한 방법으로 API 키 찾기
-        api_key = None
-        
-        # 방법 1: 직접 접근
-        if "GEMINI_API_KEY" in st.secrets:
-            api_key = st.secrets["GEMINI_API_KEY"]
-        # 방법 2: 속성으로 접근
-        elif hasattr(st.secrets, "GEMINI_API_KEY"):
-            api_key = st.secrets.GEMINI_API_KEY
-        # 방법 3: get 메서드
-        else:
-            api_key = st.secrets.get("GEMINI_API_KEY", None)
-        
-        if api_key:
-            genai.configure(api_key=api_key)
-            return genai.GenerativeModel('gemini-pro')
-        else:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+        if not api_key:
             st.warning("Gemini API 키를 찾을 수 없습니다.")
+            return None
+            
+        genai.configure(api_key=api_key)
+        
+        # 시도할 모델 목록 (최신/효율적인 모델 우선)
+        model_candidates = ['gemini-1.5-flash-latest', 'gemini-1.0-pro', 'gemini-pro']
+        
+        for model_name in model_candidates:
+            try:
+                model = genai.GenerativeModel(model_name)
+                st.session_state['gemini_model_name'] = model_name # 성공한 모델 이름 저장
+                return model
+            except Exception as e:
+                st.info(f"'{model_name}' 모델 초기화 실패. 다음 모델을 시도합니다.")
+        
+        st.error("사용 가능한 Gemini 모델을 찾지 못했습니다.")
+        return None
             
     except Exception as e:
-        st.warning(f"Gemini AI 초기화 실패: {e}")
-    return None
+        st.error(f"Gemini AI 초기화 중 오류 발생: {e}")
+        return None
 
+# [수정] AI 분석 함수 간소화
 def analyze_sales_with_ai(df_records):
     """AI를 사용한 판매 데이터 분석"""
     if not GEMINI_AVAILABLE:
         return "AI 분석이 비활성화되어 있습니다."
     
+    model = init_gemini()
+    if not model or df_records.empty:
+        return "AI 모델을 초기화할 수 없거나 분석할 데이터가 없습니다."
+        
     try:
-        model = init_gemini()
-        if not model:
-            # 모델 초기화 실패 시 다시 시도
-            api_key = st.secrets.get("GEMINI_API_KEY", None)
-            if api_key:
-                genai.configure(api_key=api_key)
-                # 다양한 모델 시도
-                for model_name in ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']:
-                    try:
-                        model = genai.GenerativeModel(model_name)
-                        break
-                    except:
-                        continue
-        
-        if not model or df_records.empty:
-            return "AI 모델을 초기화할 수 없습니다."
-        
         # 분석을 위한 데이터 준비
         summary = {
             "총_주문수": len(df_records),
@@ -316,8 +357,8 @@ def analyze_sales_with_ai(df_records):
         return response.text
         
     except Exception as e:
-        # 에러 메시지에 모델 정보 포함
-        return f"AI 분석 오류: {e}\n\n사용 가능한 모델을 확인하려면 설정 페이지에서 'AI 연결 테스트'를 실행하세요."
+        model_name = st.session_state.get('gemini_model_name', '알 수 없음')
+        return f"AI 분석 오류 ({model_name} 모델 사용 중): {e}\n\nAPI 키와 모델 권한을 확인해주세요. 문제가 지속되면 설정 페이지에서 'AI 연결 테스트'를 실행하세요."
 
 # --------------------------------------------------------------------------
 # 데이터 처리 함수
@@ -879,12 +920,13 @@ File: {st.secrets['sharepoint_files']['file_name']}
 elif menu == "📈 판매 분석":
     st.title("📈 판매 분석")
     
-    if 'last_result' in st.session_state:
+    if 'last_result' in st.session_state and not st.session_state['last_result'].empty:
         df_records = st.session_state['last_result'].copy()
-        df_records['주문일자'] = datetime.now()
+        # '주문일자'를 임시로 오늘 날짜로 설정 (실제 데이터가 있다면 그 값을 사용해야 함)
+        df_records['주문일자'] = pd.to_datetime(datetime.now().date())
         create_analytics_dashboard(df_records)
     else:
-        st.info("먼저 주문 처리를 실행해주세요.")
+        st.info("먼저 '주문 처리' 메뉴에서 데이터를 처리해주세요. 처리된 결과가 있어야 분석할 수 있습니다.")
 
 elif menu == "⚙️ 설정":
     st.title("⚙️ 시스템 설정")
@@ -895,21 +937,23 @@ elif menu == "⚙️ 설정":
     if "sharepoint" in st.secrets:
         col1, col2 = st.columns(2)
         with col1:
-            st.text_input("Tenant ID", value=st.secrets["sharepoint"]["tenant_id"][:20]+"...", disabled=True)
-            st.text_input("Client ID", value=st.secrets["sharepoint"]["client_id"][:20]+"...", disabled=True)
+            st.text_input("Tenant ID", value=st.secrets["sharepoint"].get("tenant_id", "")[:20]+"...", disabled=True)
+            st.text_input("Client ID", value=st.secrets["sharepoint"].get("client_id", "")[:20]+"...", disabled=True)
         with col2:
-            st.text_input("Site Name", value=st.secrets["sharepoint_files"]["site_name"], disabled=True)
-            st.text_input("File Name", value=st.secrets["sharepoint_files"]["file_name"], disabled=True)
+            st.text_input("Site Name", value=st.secrets.get("sharepoint_files", {}).get("site_name", ""), disabled=True)
+            st.text_input("File Name", value=st.secrets.get("sharepoint_files", {}).get("file_name", ""), disabled=True)
         
         if st.button("🔄 Graph API 연결 테스트"):
             with st.spinner("테스트 중..."):
+                st.cache_data.clear() # 테스트를 위해 캐시 비우기
+                st.cache_resource.clear()
                 token = get_graph_token()
                 if token:
                     st.success("✅ Microsoft Graph API 연결 성공!")
                 else:
                     st.error("❌ Graph API 연결 실패")
     else:
-        st.warning("Graph API 설정이 없습니다.")
+        st.warning("Graph API 설정이 없습니다. (st.secrets.sharepoint)")
     
     # AI 설정
     st.header("🤖 AI 설정")
@@ -919,13 +963,15 @@ elif menu == "⚙️ 설정":
         
         if st.button("🔄 AI 연결 테스트"):
             with st.spinner("테스트 중..."):
+                st.cache_resource.clear() # 테스트를 위해 캐시 비우기
                 model = init_gemini()
                 if model:
-                    st.success("✅ Gemini AI 연결 성공!")
+                    model_name = st.session_state.get('gemini_model_name', '알 수 없음')
+                    st.success(f"✅ Gemini AI 연결 성공! (연결된 모델: {model_name})")
                 else:
                     st.error("❌ AI 연결 실패")
     else:
-        st.warning("Gemini API 키가 설정되지 않았습니다.")
+        st.warning("Gemini API 키가 설정되지 않았습니다. (st.secrets.GEMINI_API_KEY)")
     
     # 시스템 정보
     st.header("ℹ️ 시스템 정보")
@@ -936,4 +982,4 @@ elif menu == "⚙️ 설정":
     with col2:
         st.metric("AI 분석", "활성화" if GEMINI_AVAILABLE else "비활성화")
     with col3:
-        st.metric("버전", "v2.0")
+        st.metric("버전", "v2.1 (Gemini 수정)")
