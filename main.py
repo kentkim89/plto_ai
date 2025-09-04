@@ -15,7 +15,7 @@ import base64
 # 페이지 설정 (가장 먼저 실행)
 # --------------------------------------------------------------------------
 st.set_page_config(
-    page_title="주문 처리 자동화 Pro v2.4",
+    page_title="주문 처리 자동화 Pro v2.5",
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded"
@@ -120,19 +120,25 @@ def save_to_sharepoint_records(df_main_result, df_ecount_upload):
 
     drive_id = st.session_state['sharepoint_drive_id']
     file_name = "plto_record_data.xlsx"
-    file_path_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}"
+    file_path_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}:/content" # 경로 수정
     headers = {'Authorization': f'Bearer {token}'}
     existing_df = pd.DataFrame()
     
     try:
-        download_response = requests.get(f"{file_path_url}:/content", headers=headers)
-        if download_response.status_code == 200 and download_response.content:
-            try:
-                existing_df = pd.read_excel(io.BytesIO(download_response.content))
-                st.info(f"기존 레코드 '{file_name}'에서 {len(existing_df)}개 데이터를 불러왔습니다.")
-            except Exception as e:
-                st.warning(f"'{file_name}' 파일 읽기 오류: {e}. 새 데이터로 덮어씁니다.")
-        elif download_response.status_code == 404:
+        # 다운로드 URL에서는 :content를 빼야 파일 정보를 가져올 수 있습니다.
+        download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}"
+        info_response = requests.get(download_url, headers=headers)
+        if info_response.status_code == 200:
+            content_url = info_response.json().get('@microsoft.graph.downloadUrl')
+            if content_url:
+                download_response = requests.get(content_url)
+                if download_response.content:
+                    try:
+                        existing_df = pd.read_excel(io.BytesIO(download_response.content))
+                        st.info(f"기존 레코드 '{file_name}'에서 {len(existing_df)}개 데이터를 불러왔습니다.")
+                    except Exception as e:
+                        st.warning(f"'{file_name}' 파일 읽기 오류: {e}. 새 데이터로 덮어씁니다.")
+        elif info_response.status_code == 404:
             st.info(f"기존 레코드 '{file_name}'을 찾을 수 없어 새로 생성합니다.")
     except Exception as e:
         return False, f"기존 레코드 처리 중 오류: {e}"
@@ -144,10 +150,15 @@ def save_to_sharepoint_records(df_main_result, df_ecount_upload):
 
         new_records = pd.DataFrame({'주문일자': order_date, '처리일시': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), '재고관리코드': df_main_result['재고관리코드'], 'SKU상품명': df_main_result['SKU상품명'], '주문수량': df_main_result['주문수량'], '실결제금액': df_main_result['실결제금액'], '쇼핑몰': df_main_result['쇼핑몰'], '수령자명': df_main_result['수령자명']})
         combined_df = pd.concat([existing_df, new_records], ignore_index=True)
+        
         output = BytesIO()
         combined_df.to_excel(output, index=False, sheet_name='Records')
-        upload_headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
-        upload_response = requests.put(f"{file_path_url}:/content", headers=upload_headers, data=output.getvalue())
+        
+        # [최종 수정] 스트림 방식으로 데이터 업로드
+        output.seek(0)
+        
+        upload_headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/octet-stream'}
+        upload_response = requests.put(file_path_url, headers=upload_headers, data=output)
         
         if upload_response.status_code in [200, 201]:
             return True, f"✅ SharePoint에 {len(new_records)}개 신규 레코드 저장 완료 (총 {len(combined_df)}개)"
@@ -158,6 +169,7 @@ def save_to_sharepoint_records(df_main_result, df_ecount_upload):
         return False, f"레코드 저장 중 오류 발생: {e}"
 
 # ... (이하 모든 다른 함수들은 이전 버전과 동일하게 유지) ...
+
 @st.cache_resource
 def init_gemini():
     """Gemini AI 초기화. 여러 모델을 시도하여 안정성을 높입니다."""
@@ -419,13 +431,12 @@ def create_analytics_dashboard(df_records):
                 st.markdown(analyze_sales_with_ai(df_records))
         else:
             st.warning("AI 분석 기능을 사용하려면 google-generativeai를 설치하세요.")
-
 # --------------------------------------------------------------------------
 # 메인 앱
 # --------------------------------------------------------------------------
 def main():
     with st.sidebar:
-        st.title("📊 Order Pro v2.4")
+        st.title("📊 Order Pro v2.5")
         st.markdown("---")
         menu = st.radio("메뉴 선택", ["📑 주문 처리", "📈 판매 분석", "⚙️ 설정"])
         st.markdown("---")
