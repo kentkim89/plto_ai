@@ -15,7 +15,7 @@ import base64
 # 페이지 설정 (가장 먼저 실행)
 # --------------------------------------------------------------------------
 st.set_page_config(
-    page_title="주문 처리 자동화 Pro v2.3",
+    page_title="주문 처리 자동화 Pro v2.4",
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded"
@@ -24,8 +24,6 @@ st.set_page_config(
 # --------------------------------------------------------------------------
 # 라이브러리 가용성 체크
 # --------------------------------------------------------------------------
-
-# Microsoft Graph API 사용
 GRAPH_AVAILABLE = False
 try:
     import msal
@@ -33,7 +31,6 @@ try:
 except ImportError:
     pass
 
-# Plotly 사용
 PLOTLY_AVAILABLE = False
 try:
     import plotly.express as px
@@ -42,7 +39,6 @@ try:
 except ImportError:
     pass
 
-# Gemini AI 사용
 GEMINI_AVAILABLE = False
 try:
     import google.generativeai as genai
@@ -57,48 +53,31 @@ except ImportError:
 @st.cache_resource
 def get_graph_token():
     """Microsoft Graph API 토큰 획득"""
-    if not GRAPH_AVAILABLE:
+    if not GRAPH_AVAILABLE or "sharepoint" not in st.secrets:
         return None
-    
     try:
-        if "sharepoint" not in st.secrets:
-            return None
-        
         tenant_id = st.secrets["sharepoint"]["tenant_id"]
         client_id = st.secrets["sharepoint"]["client_id"]
         client_secret = st.secrets["sharepoint"]["client_secret"]
-        
         authority = f"https://login.microsoftonline.com/{tenant_id}"
-        app = msal.ConfidentialClientApplication(
-            client_id,
-            authority=authority,
-            client_credential=client_secret
-        )
-        
+        app = msal.ConfidentialClientApplication(client_id, authority=authority, client_credential=client_secret)
         result = app.acquire_token_silent(["https://graph.microsoft.com/.default"], account=None)
         if not result:
             result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-        
-        if "access_token" in result:
-            return result["access_token"]
-        else:
-            st.error(f"토큰 획득 실패: {result.get('error_description', 'Unknown error')}")
-            return None
-            
+        return result.get("access_token")
     except Exception as e:
-        st.error(f"Graph API 연결 실패: {e}")
+        st.error(f"Graph API 토큰 획득 실패: {e}")
         return None
 
 @st.cache_data(ttl=600)
 def load_master_data_from_sharepoint():
-    """Microsoft Graph API를 통해 SharePoint에서 마스터 데이터 로드"""
+    """Microsoft Graph API를 통해 SharePoint에서 마스터 데이터를 로드하고 관련 ID들을 반환합니다."""
     if not GRAPH_AVAILABLE:
-        return pd.DataFrame()
-
+        return pd.DataFrame(), None, None
     try:
         token = get_graph_token()
         if not token:
-            return pd.DataFrame()
+            return pd.DataFrame(), None, None
         
         headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
         site_url = "https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/data"
@@ -108,126 +87,77 @@ def load_master_data_from_sharepoint():
             site_id = site_response.json()['id']
             drives_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
             drives_response = requests.get(drives_url, headers=headers)
-            
             if drives_response.status_code == 200:
-                drives = drives_response.json()['value']
-                for drive in drives:
+                for drive in drives_response.json().get('value', []):
                     drive_id = drive['id']
                     search_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='plto_master_data.xlsx')"
                     search_response = requests.get(search_url, headers=headers)
-                    
                     if search_response.status_code == 200:
-                        items = search_response.json().get('value', [])
-                        for item in items:
+                        for item in search_response.json().get('value', []):
                             if item['name'] == 'plto_master_data.xlsx':
                                 download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item['id']}/content"
                                 file_response = requests.get(download_url, headers=headers)
                                 if file_response.status_code == 200:
-                                    st.session_state['sharepoint_site_id'] = site_id
-                                    st.session_state['sharepoint_drive_id'] = drive_id
+                                    st.success("✅ Microsoft Graph API로 마스터 데이터 로드 성공!")
                                     df_master = pd.read_excel(io.BytesIO(file_response.content))
                                     df_master = df_master.drop_duplicates(subset=['SKU코드'], keep='first')
-                                    st.success("✅ Microsoft Graph API로 마스터 데이터 로드 성공!")
-                                    return df_master
+                                    return df_master, drive_id, site_id
         st.error("Graph API를 통해 마스터 데이터를 찾는 데 실패했습니다.")
     except Exception as e:
-        st.error(f"❌ 마스터 데이터 로드 실패: {e}")
-    
-    return pd.DataFrame()
+        st.error(f"❌ 마스터 데이터 로드 중 오류 발생: {e}")
+    return pd.DataFrame(), None, None
 
 def save_to_sharepoint_records(df_main_result, df_ecount_upload):
     """Microsoft Graph API를 통해 처리 결과를 SharePoint에 기록/누적합니다."""
     if not GRAPH_AVAILABLE:
-        st.info("Graph API가 활성화되지 않아 SharePoint에 자동 저장할 수 없습니다.")
         return False, "Graph API 비활성화"
-    
     token = get_graph_token()
     if not token:
         return False, "SharePoint 인증 토큰 획득 실패"
-        
     if "sharepoint_drive_id" not in st.session_state:
-        st.warning("SharePoint 드라이브 정보를 찾을 수 없습니다. 마스터 데이터를 먼저 로드해야 합니다.")
-        load_master_data_from_sharepoint()
-        if "sharepoint_drive_id" not in st.session_state:
-            return False, "SharePoint 드라이브 정보 로드 실패"
+        st.error("SharePoint 드라이브 정보가 없습니다. 페이지를 새로고침하거나 마스터 데이터를 다시 로드해주세요.")
+        return False, "SharePoint 드라이브 정보 로드 실패"
 
     drive_id = st.session_state['sharepoint_drive_id']
     file_name = "plto_record_data.xlsx"
     file_path_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}"
-
     headers = {'Authorization': f'Bearer {token}'}
-    
     existing_df = pd.DataFrame()
+    
     try:
         download_response = requests.get(f"{file_path_url}:/content", headers=headers)
-        
-        if download_response.status_code == 200:
-            if download_response.content and len(download_response.content) > 0:
-                try:
-                    existing_df = pd.read_excel(io.BytesIO(download_response.content))
-                    st.info(f"기존 레코드 '{file_name}'에서 {len(existing_df)}개 데이터를 불러왔습니다.")
-                except Exception as e:
-                    st.warning(f"'{file_name}' 파일을 읽는 중 오류 발생: {e}. 새 데이터로 덮어씁니다.")
-            else:
-                st.info(f"기존 레코드 '{file_name}' 파일이 비어 있어 새로 데이터를 입력합니다.")
+        if download_response.status_code == 200 and download_response.content:
+            try:
+                existing_df = pd.read_excel(io.BytesIO(download_response.content))
+                st.info(f"기존 레코드 '{file_name}'에서 {len(existing_df)}개 데이터를 불러왔습니다.")
+            except Exception as e:
+                st.warning(f"'{file_name}' 파일 읽기 오류: {e}. 새 데이터로 덮어씁니다.")
         elif download_response.status_code == 404:
             st.info(f"기존 레코드 '{file_name}'을 찾을 수 없어 새로 생성합니다.")
-        else:
-            error_details = download_response.json()
-            return False, f"기존 레코드 다운로드 실패 ({download_response.status_code}): {error_details.get('error', {}).get('message', '알 수 없는 오류')}"
     except Exception as e:
         return False, f"기존 레코드 처리 중 오류: {e}"
 
     try:
-        order_date_str = None
-        if not df_ecount_upload.empty:
-            first_date_val = df_ecount_upload['일자'].iloc[0]
-            if pd.notna(first_date_val) and str(first_date_val).strip():
-                order_date_str = str(first_date_val)
+        first_date_val = df_ecount_upload['일자'].iloc[0] if not df_ecount_upload.empty and pd.notna(df_ecount_upload['일자'].iloc[0]) else None
+        order_date_str = str(first_date_val) if first_date_val else datetime.now().strftime("%Y%m%d")
+        order_date = pd.to_datetime(order_date_str, format='%Y%m%d').strftime('%Y-%m-%d')
 
-        if not order_date_str:
-            order_date_str = datetime.now().strftime("%Y%m%d")
-            st.info("이카운트 데이터에서 유효한 '일자'를 찾을 수 없어 오늘 날짜를 사용합니다.")
-        
-        try:
-            order_date = pd.to_datetime(order_date_str, format='%Y%m%d').strftime('%Y-%m-%d')
-        except ValueError:
-            st.warning(f"날짜 형식('{order_date_str}')이 올바르지 않아 오늘 날짜로 대체합니다.")
-            order_date = datetime.now().strftime('%Y-%m-%d')
-
-        new_records = pd.DataFrame({
-            '주문일자': order_date,
-            '처리일시': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            '재고관리코드': df_main_result['재고관리코드'],
-            'SKU상품명': df_main_result['SKU상품명'],
-            '주문수량': df_main_result['주문수량'],
-            '실결제금액': df_main_result['실결제금액'],
-            '쇼핑몰': df_main_result['쇼핑몰'],
-            '수령자명': df_main_result['수령자명']
-        })
-    
+        new_records = pd.DataFrame({'주문일자': order_date, '처리일시': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), '재고관리코드': df_main_result['재고관리코드'], 'SKU상품명': df_main_result['SKU상품명'], '주문수량': df_main_result['주문수량'], '실결제금액': df_main_result['실결제금액'], '쇼핑몰': df_main_result['쇼핑몰'], '수령자명': df_main_result['수령자명']})
         combined_df = pd.concat([existing_df, new_records], ignore_index=True)
-    
         output = BytesIO()
         combined_df.to_excel(output, index=False, sheet_name='Records')
-        file_content = output.getvalue()
-    
         upload_headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
-        upload_response = requests.put(f"{file_path_url}:/content", headers=upload_headers, data=file_content)
+        upload_response = requests.put(f"{file_path_url}:/content", headers=upload_headers, data=output.getvalue())
         
         if upload_response.status_code in [200, 201]:
             return True, f"✅ SharePoint에 {len(new_records)}개 신규 레코드 저장 완료 (총 {len(combined_df)}개)"
         else:
-            error_details = upload_response.json()
-            return False, f"SharePoint 업로드 실패 ({upload_response.status_code}): {error_details.get('error', {}).get('message', '알 수 없는 오류')}"
+            return False, f"SharePoint 업로드 실패 ({upload_response.status_code}): {upload_response.json().get('error', {}).get('message', '알 수 없는 오류')}"
     except Exception as e:
         st.error(traceback.format_exc())
         return False, f"레코드 저장 중 오류 발생: {e}"
 
-# --------------------------------------------------------------------------
-# AI 분석 함수
-# --------------------------------------------------------------------------
-
+# ... (이하 모든 다른 함수들은 이전 버전과 동일하게 유지) ...
 @st.cache_resource
 def init_gemini():
     """Gemini AI 초기화. 여러 모델을 시도하여 안정성을 높입니다."""
@@ -291,10 +221,6 @@ def analyze_sales_with_ai(df_records):
     except Exception as e:
         model_name = st.session_state.get('gemini_model_name', '알 수 없음')
         return f"AI 분석 오류 ({model_name} 모델 사용 중): {e}"
-
-# --------------------------------------------------------------------------
-# 데이터 처리 함수
-# --------------------------------------------------------------------------
 
 def to_excel_formatted(df, format_type=None):
     """데이터프레임을 서식이 적용된 엑셀 파일로 변환"""
@@ -499,7 +425,7 @@ def create_analytics_dashboard(df_records):
 # --------------------------------------------------------------------------
 def main():
     with st.sidebar:
-        st.title("📊 Order Pro v2.3")
+        st.title("📊 Order Pro v2.4")
         st.markdown("---")
         menu = st.radio("메뉴 선택", ["📑 주문 처리", "📈 판매 분석", "⚙️ 설정"])
         st.markdown("---")
@@ -517,7 +443,11 @@ def main():
         st.info("💡 SharePoint 연동 및 처리 결과 자동 누적 기능이 활성화되어 있습니다.")
         
         with st.expander("📊 마스터 데이터 상태", expanded=True):
-            df_master = load_master_data_from_sharepoint()
+            df_master, drive_id, site_id = load_master_data_from_sharepoint()
+            if drive_id and site_id:
+                st.session_state['sharepoint_drive_id'] = drive_id
+                st.session_state['sharepoint_site_id'] = site_id
+
             if df_master.empty:
                 st.warning("⚠️ SharePoint에서 마스터 데이터를 불러오지 못했습니다. 로컬 업로드를 사용하세요.")
                 uploaded_master = st.file_uploader("마스터 데이터 업로드 (xlsx, xls, csv)", type=['xlsx', 'xls', 'csv'])
