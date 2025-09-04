@@ -15,7 +15,7 @@ import base64
 # 페이지 설정 (가장 먼저 실행)
 # --------------------------------------------------------------------------
 st.set_page_config(
-    page_title="주문 처리 자동화 Pro v2.2",
+    page_title="주문 처리 자동화 Pro v2.3",
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded"
@@ -321,7 +321,7 @@ def to_excel_formatted(df, format_type=None):
             adjusted_width = min((max_length + 2) * 1.2, 50)
             sheet.column_dimensions[column_cells[0].column_letter].width = adjusted_width
         except (ValueError, TypeError):
-            pass  # 빈 컬럼 등의 예외 처리
+            pass
 
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     pink_fill = PatternFill(start_color="FFEBEE", end_color="FFEBEE", fill_type="solid")
@@ -343,7 +343,7 @@ def to_excel_formatted(df, format_type=None):
                             for c in range(1, sheet.max_column + 1):
                                 sheet.cell(row=r, column=c).fill = pink_fill
                 except (ValueError, IndexError):
-                    pass # 셀 값에 문제가 있을 경우 무시
+                    pass
                 
                 if bundle_start_row < bundle_end_row:
                     sheet.merge_cells(start_row=bundle_start_row, start_column=1, end_row=bundle_end_row, end_column=1)
@@ -436,15 +436,15 @@ def process_all_files(file1, file2, file3, df_master):
         df_merged['실결제금액'] = pd.to_numeric(df_merged['실결제금액'], errors='coerce').fillna(0)
         공급가액 = np.where(df_merged['과세여부'] == '과세', df_merged['실결제금액'] / 1.1, df_merged['실결제금액'])
         
-        # [수정] .astype('Int64') -> .astype(int)
         df_ecount['공급가액'] = 공급가액.round().astype(int)
         df_ecount['부가세'] = (df_merged['실결제금액'] - df_ecount['공급가액']).round().astype(int)
         
         df_ecount['쇼핑몰고객명'] = df_merged['수령자명']
+        df_ecount['original_order'] = df_merged['original_order']
         
         sort_order = ['고래미자사몰_현금영수증(고도몰)', '스토어팜', '쿠팡 주식회사', '주식회사 우아한형제들(배민상회)', '주식회사 현대이지웰']
         df_ecount['거래처명_sort'] = pd.Categorical(df_ecount['거래처명'], categories=sort_order, ordered=True)
-        df_ecount = df_ecount.sort_values(by=['거래처명_sort', '거래유형', df_merged['original_order']]).drop(columns=['거래처명_sort'])
+        df_ecount = df_ecount.sort_values(by=['거래처명_sort', '거래유형', 'original_order']).drop(columns=['거래처명_sort', 'original_order'])
         
         ecount_columns = ['일자', '순번', '거래처코드', '거래처명', '담당자', '출하창고', '거래유형', '통화', '환율', '적요_전표', '미수금', '총합계', '연결전표', '품목코드', '품목명', '규격', '박스', '수량', '단가', '외화금액', '공급가액', '부가세', '적요_품목', '생산전표생성', '시리얼/로트', '관리항목', '쇼핑몰고객명']
         df_ecount_upload = df_ecount.reindex(columns=ecount_columns, fill_value='')
@@ -499,7 +499,7 @@ def create_analytics_dashboard(df_records):
 # --------------------------------------------------------------------------
 def main():
     with st.sidebar:
-        st.title("📊 Order Pro v2.2")
+        st.title("📊 Order Pro v2.3")
         st.markdown("---")
         menu = st.radio("메뉴 선택", ["📑 주문 처리", "📈 판매 분석", "⚙️ 설정"])
         st.markdown("---")
@@ -528,7 +528,7 @@ def main():
                         st.success(f"✅ 로컬 마스터 데이터 {len(df_master)}개 로드 완료")
                     except Exception as e:
                         st.error(f"파일을 읽는 데 실패했습니다: {e}")
-                        df_master = pd.DataFrame() # 오류 발생 시 빈 데이터프레임으로 초기화
+                        df_master = pd.DataFrame()
             
             if not df_master.empty:
                 col1, col2, col3 = st.columns(3)
