@@ -15,7 +15,7 @@ import base64
 # 페이지 설정 (가장 먼저 실행)
 # --------------------------------------------------------------------------
 st.set_page_config(
-    page_title="주문 처리 자동화 Pro v2.1",
+    page_title="주문 처리 자동화 Pro v2.2",
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded"
@@ -316,10 +316,13 @@ def to_excel_formatted(df, format_type=None):
             cell.alignment = center_alignment
 
     for column_cells in sheet.columns:
-        max_length = max(len(str(cell.value)) for cell in column_cells if cell.value)
-        adjusted_width = min((max_length + 2) * 1.2, 50)
-        sheet.column_dimensions[column_cells[0].column_letter].width = adjusted_width
-    
+        try:
+            max_length = max(len(str(cell.value)) for cell in column_cells if cell.value)
+            adjusted_width = min((max_length + 2) * 1.2, 50)
+            sheet.column_dimensions[column_cells[0].column_letter].width = adjusted_width
+        except (ValueError, TypeError):
+            pass  # 빈 컬럼 등의 예외 처리
+
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     pink_fill = PatternFill(start_color="FFEBEE", end_color="FFEBEE", fill_type="solid")
 
@@ -333,10 +336,15 @@ def to_excel_formatted(df, format_type=None):
             is_new_bundle = (row_num <= sheet.max_row and sheet.cell(row=row_num, column=1).value) or row_num > sheet.max_row
             if is_new_bundle and row_num > 2:
                 bundle_end_row = row_num - 1
-                if int(str(sheet.cell(row=bundle_start_row, column=1).value)) % 2 != 0:
-                    for r in range(bundle_start_row, bundle_end_row + 1):
-                        for c in range(1, sheet.max_column + 1):
-                            sheet.cell(row=r, column=c).fill = pink_fill
+                try:
+                    bundle_num_str = str(sheet.cell(row=bundle_start_row, column=1).value)
+                    if bundle_num_str.isdigit() and int(bundle_num_str) % 2 != 0:
+                        for r in range(bundle_start_row, bundle_end_row + 1):
+                            for c in range(1, sheet.max_column + 1):
+                                sheet.cell(row=r, column=c).fill = pink_fill
+                except (ValueError, IndexError):
+                    pass # 셀 값에 문제가 있을 경우 무시
+                
                 if bundle_start_row < bundle_end_row:
                     sheet.merge_cells(start_row=bundle_start_row, start_column=1, end_row=bundle_end_row, end_column=1)
                     sheet.merge_cells(start_row=bundle_start_row, start_column=4, end_row=bundle_end_row, end_column=4)
@@ -367,10 +375,12 @@ def process_all_files(file1, file2, file3, df_master):
             if col in df_godomall.columns:
                 df_godomall[col] = pd.to_numeric(df_godomall[col].astype(str).str.replace('[원,]', '', regex=True), errors='coerce').fillna(0)
         
-        df_godomall['보정된_배송비'] = np.where(df_godomall.duplicated(subset=['수취인 이름']), 0, df_godomall['총 배송 금액'])
-        df_godomall['수정될_금액_고도몰'] = df_godomall['상품별 품목금액'] + df_godomall['보정된_배송비'] - df_godomall['회원 할인 금액'] - df_godomall['쿠폰 할인 금액'] - df_godomall['사용된 마일리지']
+        df_godomall['보정된_배송비'] = np.where(df_godomall.duplicated(subset=['수취인 이름']), 0, df_godomall.get('총 배송 금액', 0))
+        df_godomall['수정될_금액_고도몰'] = (df_godomall.get('상품별 품목금액', 0) + df_godomall['보정된_배송비'] - 
+                                     df_godomall.get('회원 할인 금액', 0) - df_godomall.get('쿠폰 할인 금액', 0) - 
+                                     df_godomall.get('사용된 마일리지', 0))
         
-        warnings = [f"- [금액 불일치] **{name}**님: {group['수정될_금액_고도몰'].sum() - group['총 결제 금액'].iloc[0]:,.0f}원 차이" for name, group in df_godomall.groupby('수취인 이름') if abs(group['수정될_금액_고도몰'].sum() - group['총 결제 금액'].iloc[0]) > 1]
+        warnings = [f"- [금액 불일치] **{name}**님: {group['수정될_금액_고도몰'].sum() - group['총 결제 금액'].iloc[0]:,.0f}원 차이" for name, group in df_godomall.groupby('수취인 이름') if '총 결제 금액' in group and abs(group['수정될_금액_고도몰'].sum() - group['총 결제 금액'].iloc[0]) > 1]
 
         df_final = df_ecount_orig.copy().rename(columns={'금액': '실결제금액'})
         
@@ -425,8 +435,11 @@ def process_all_files(file1, file2, file3, df_master):
         
         df_merged['실결제금액'] = pd.to_numeric(df_merged['실결제금액'], errors='coerce').fillna(0)
         공급가액 = np.where(df_merged['과세여부'] == '과세', df_merged['실결제금액'] / 1.1, df_merged['실결제금액'])
-        df_ecount['공급가액'] = 공급가액.round().astype('Int64')
-        df_ecount['부가세'] = (df_merged['실결제금액'] - df_ecount['공급가액']).round().astype('Int64')
+        
+        # [수정] .astype('Int64') -> .astype(int)
+        df_ecount['공급가액'] = 공급가액.round().astype(int)
+        df_ecount['부가세'] = (df_merged['실결제금액'] - df_ecount['공급가액']).round().astype(int)
+        
         df_ecount['쇼핑몰고객명'] = df_merged['수령자명']
         
         sort_order = ['고래미자사몰_현금영수증(고도몰)', '스토어팜', '쿠팡 주식회사', '주식회사 우아한형제들(배민상회)', '주식회사 현대이지웰']
@@ -451,7 +464,7 @@ def create_analytics_dashboard(df_records):
     st.header("판매 데이터 분석")
     col1, col2, col3, col4 = st.columns(4)
     total_revenue = df_records['실결제금액'].sum()
-    total_orders = len(df_records['수령자명'].unique()) # 고유 고객 주문 기준
+    total_orders = len(df_records['수령자명'].unique())
     col1.metric("💰 총 매출", f"₩{total_revenue:,.0f}")
     col2.metric("📦 총 주문수", f"{total_orders:,}")
     col3.metric("💵 평균 주문액", f"₩{total_revenue/total_orders if total_orders else 0:,.0f}")
@@ -486,7 +499,7 @@ def create_analytics_dashboard(df_records):
 # --------------------------------------------------------------------------
 def main():
     with st.sidebar:
-        st.title("📊 Order Pro v2.1")
+        st.title("📊 Order Pro v2.2")
         st.markdown("---")
         menu = st.radio("메뉴 선택", ["📑 주문 처리", "📈 판매 분석", "⚙️ 설정"])
         st.markdown("---")
@@ -505,19 +518,24 @@ def main():
         
         with st.expander("📊 마스터 데이터 상태", expanded=True):
             df_master = load_master_data_from_sharepoint()
+            if df_master.empty:
+                st.warning("⚠️ SharePoint에서 마스터 데이터를 불러오지 못했습니다. 로컬 업로드를 사용하세요.")
+                uploaded_master = st.file_uploader("마스터 데이터 업로드 (xlsx, xls, csv)", type=['xlsx', 'xls', 'csv'])
+                if uploaded_master:
+                    try:
+                        df_master = pd.read_excel(uploaded_master) if uploaded_master.name.endswith(('xlsx', 'xls')) else pd.read_csv(uploaded_master)
+                        df_master = df_master.drop_duplicates(subset=['SKU코드'], keep='first')
+                        st.success(f"✅ 로컬 마스터 데이터 {len(df_master)}개 로드 완료")
+                    except Exception as e:
+                        st.error(f"파일을 읽는 데 실패했습니다: {e}")
+                        df_master = pd.DataFrame() # 오류 발생 시 빈 데이터프레임으로 초기화
+            
             if not df_master.empty:
                 col1, col2, col3 = st.columns(3)
                 col1.metric("총 SKU", f"{len(df_master):,}개")
                 col2.metric("과세 상품", f"{(df_master['과세여부']=='과세').sum():,}개")
                 col3.metric("면세 상품", f"{(df_master['과세여부']=='면세').sum():,}개")
-            else:
-                st.warning("⚠️ SharePoint에서 마스터 데이터를 불러오지 못했습니다. 로컬 업로드를 사용하세요.")
-                uploaded_master = st.file_uploader("마스터 데이터 업로드 (xlsx, xls, csv)", type=['xlsx', 'xls', 'csv'])
-                if uploaded_master:
-                    df_master = pd.read_excel(uploaded_master) if uploaded_master.name.endswith(('xlsx', 'xls')) else pd.read_csv(uploaded_master)
-                    df_master = df_master.drop_duplicates(subset=['SKU코드'], keep='first')
-                    st.success(f"✅ 로컬 마스터 데이터 {len(df_master)}개 로드 완료")
-        
+
         st.markdown("---")
         st.header("1️⃣ 원본 파일 업로드")
         col1, col2, col3 = st.columns(3)
