@@ -2,8 +2,7 @@ streamlit
 pandas
 numpy
 openpyxl
-plotly
 requests
 msal
-python-dateutil
 google-generativeai
+plotly
